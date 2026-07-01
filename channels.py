@@ -223,3 +223,49 @@ def validate_channel(channel, d_sys, tol=1e-10):
     is_positive = np.all(evals >= -tol)
 
     return trace_error, is_positive, np.min(evals)
+
+def trace_out_last_qubit(state_vec):
+    dim = state_vec.shape[0]
+    n_qubits = int(np.log2(dim))
+    psi = state_vec.reshape(2**(n_qubits - 1), 2)
+
+    probs = np.sum(np.abs(psi)**2, axis=0)
+    probs = probs / np.sum(probs)
+
+    idx = np.random.choice(2, p=probs)
+    return psi[:, idx] / np.sqrt(probs[idx])
+
+def suzuki_trotter_vbasis(phi0, fvals, alpha, dTime, Qv, wv, U0_half):
+    """
+    2nd-order ST: exp[-i(H0 + amp*V) dt] ≈ U0_half · Uv(amp) · U0_half,
+    but do *all* steps in the V-eigenbasis to avoid per-step Qv transforms.
+    """
+    QvH = Qv.conj().T
+
+    # move everything into V-basis once
+    phi_e = QvH @ phi0                  # state in V-basis
+    U0_half_e = QvH @ U0_half @ Qv      # H0 half-step in V-basis
+    U0_full_e = U0_half_e @ U0_half_e   # H0 full-step in V-basis
+
+    # first half-step once
+    phi_e = U0_half_e @ phi_e
+
+    # precompute wv * (-i*dTime) to speed elementwise exp
+    scale = (-1j * dTime) * wv
+
+    nsub = len(fvals)
+    for k in range(nsub):
+        amp = fvals[k] * alpha
+        # Uv(amp) is diagonal in V-basis → elementwise multiply
+        np.multiply(phi_e, np.exp(amp * scale), out=phi_e)
+
+        if k < nsub - 1:
+            # fuse interior halves → one full H0 step (in V-basis)
+            phi_e = U0_full_e @ phi_e
+
+    # final half-step once
+    phi_e = U0_half_e @ phi_e
+
+    # transform back once
+    phi = Qv @ phi_e
+    return phi

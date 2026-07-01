@@ -62,22 +62,30 @@ def hubbard_spinful_fermi(L, t=1.0, U=4.0, mu=0.0, Delta=0.0,
 
     return H.tocoo()
 
-def h_annni(L, J1=1.0, J2=0.5, g=1.0, h=0.0, cyclic=False):
+def h_annni(L, J1=1.0, J2=0.5, g=1.0, h=0.0, cyclic=False, op_kws=None, ikron_kws=None):
     """
     Construct the 1D ANNNI Hamiltonian in quimb (sparse matrix).
     """
+    if op_kws is None:
+        op_kws = {'sparse': True, 'stype': 'coo'}
+    if ikron_kws is None:
+        ikron_kws = {'sparse': True, 'stype': 'coo',
+                     'coo_build': True, 'ownership': None}
+        
     sz = qu.pauli('Z')
     sx = qu.pauli('X')
 
-    H = 0
+    # H = 0
+    H = sp.coo_matrix((2**L, 2**L), dtype=complex)
     dims = [2] * L
+    
     # Nearest-neighbor term: -J1 Z_i Z_{i+1}
     for i in range(L):
         j = (i + 1) % L if cyclic else i + 1
         if j >= L:
             continue
-        Zi = qu.ikron(sz, dims, i)
-        Zj = qu.ikron(sz, dims, j)
+        Zi = qu.ikron(sz, dims, i, **ikron_kws)
+        Zj = qu.ikron(sz, dims, j, **ikron_kws)
         H += -J1 * (Zi @ Zj)
 
     # Next-nearest-neighbor term: -J2 Z_i Z_{i+2}
@@ -85,22 +93,22 @@ def h_annni(L, J1=1.0, J2=0.5, g=1.0, h=0.0, cyclic=False):
         j = (i + 2) % L if cyclic else i + 2
         if j >= L:
             continue
-        Zi = qu.ikron(sz, dims, i)
-        Zj = qu.ikron(sz, dims, j)
+        Zi = qu.ikron(sz, dims, i, **ikron_kws)
+        Zj = qu.ikron(sz, dims, j, **ikron_kws)
         H += -J2 * (Zi @ Zj)
 
     # Transverse field: -g X_i
     for i in range(L):
-        Xi = qu.ikron(sx, dims, i)
+        Xi = qu.ikron(sx, dims, i, **ikron_kws)
         H += -g * Xi
 
     # Longitudinal field: -h Z_i
     if abs(h) > 0:
         for i in range(L):
-            Zi = qu.ikron(sz, dims, i)
+            Zi = qu.ikron(sz, dims, i, **ikron_kws)
             H += -h * Zi
-
-    return qu.qu(H, sparse=True)
+#qu.qu(H, sparse=True)
+    return H.tocoo()
 
 # Construct system operators in the interaction term
 def jw_fermion_ops(L, op_kws=None, ikron_kws=None):
