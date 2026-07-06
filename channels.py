@@ -64,21 +64,25 @@ def construct_unified_channel(Hamsys_base, As_ops, alpha=0.05, beta=1, sigma=5, 
     amps = fvals * alpha
 
     #  bath frequency distribution:  truncated Gaussian
-    a_freq = 2 - beta**2 / (4 * sigma**2)
-    omega_mean = -1 / beta
-    omega_std = np.sqrt(a_freq) / beta
-    n_omega_samples = 201
-    omega_cutoff_std = 5.0
-    omega_min = omega_mean - omega_cutoff_std * omega_std
-    omega_max = omega_mean + omega_cutoff_std * omega_std
-    omega_samples = np.linspace(omega_min, omega_max, n_omega_samples)
-
-    Z = (1 / beta) * np.sqrt(2 * np.pi * a_freq)
-    g_vals = (1 / Z) * np.exp(-((beta * omega_samples + 1)**2) / (2 * a_freq))
-
-    domega = omega_samples[1] - omega_samples[0]
-    omega_weights = g_vals * domega
-    omega_weights = omega_weights / np.sum(omega_weights)   
+    if beta == np.inf:
+        BB = 5
+        n_omega_samples = BB * 10
+        omega_samples = np.linspace(0, BB, n_omega_samples)
+        omega_weights = 1.0 / n_omega_samples * np.ones(len(omega_samples), dtype=np.float64)
+    else:
+        a_freq = 2 - beta**2 / (4 * sigma**2)
+        omega_mean = -1 / beta
+        omega_std = np.sqrt(a_freq) / beta
+        n_omega_samples = 201
+        omega_cutoff_std = 5.0
+        omega_min = omega_mean - omega_cutoff_std * omega_std
+        omega_max = omega_mean + omega_cutoff_std * omega_std
+        omega_samples = np.linspace(omega_min, omega_max, n_omega_samples)
+        Z = (1 / beta) * np.sqrt(2 * np.pi * a_freq)
+        g_vals = (1 / Z) * np.exp(-((beta * omega_samples + 1)**2) / (2 * a_freq))
+        domega = omega_samples[1] - omega_samples[0]
+        omega_weights = g_vals * domega
+        omega_weights = omega_weights / np.sum(omega_weights)   
 
 
     # Initialize channel matrix
@@ -91,8 +95,116 @@ def construct_unified_channel(Hamsys_base, As_ops, alpha=0.05, beta=1, sigma=5, 
         # Bath setup for this frequency
         Hambath_local = -omega * Z_bath 
         Hambath = -omega * Hambath_base 
-        rhobath = expm(-beta * Hambath_local)
-        rhobath = rhobath / np.trace(rhobath)
+        if beta == np.inf:
+            rhobath = np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.complex128)
+        else:
+            rhobath = expm(-beta * Hambath_local)
+            rhobath = rhobath / np.trace(rhobath)
+
+        # Total Hamiltonian
+        H0 = _sym_herm(Hamsys + Hambath)
+        w0, Q0 = np.linalg.eigh(H0)
+        U0_half = _expm_from_eigh(Q0, w0, factor=dt_half)
+
+        for A in As_ops:
+            interact_base = qu.kron(A, B_op, parallel=False).toarray()
+            interact_base = _sym_herm(interact_base)
+            wv_base, Qv = np.linalg.eigh(interact_base)
+            for sign in [1, -1]:
+                wv = sign * wv_base
+
+                # Time evolution
+                U = np.eye(2**(N+1), dtype=np.complex128)
+                for amp in amps:
+                    Uv = _expm_from_eigh(Qv, wv, factor=dt_full * amp)
+                    dU = U0_half @ Uv @ U0_half
+                    U = U @ dU
+
+                # Build channel map
+                for i in range(d_sys):
+                    for j in range(d_sys):
+                        rho_in_sys = np.zeros((d_sys, d_sys), dtype=np.complex128)
+                        rho_in_sys[i, j] = 1.0
+                        rho_in_total = np.kron(rho_in_sys, rhobath)
+
+                        rho_evolved = U @ rho_in_total @ U.conj().T
+                        rho_out_sys = qu.ptr(rho_evolved, dims, list(range(N)))
+
+                        input_idx = i * d_sys + j
+                        output_vec = rho_out_sys.flatten()
+                        channel_matrix[:, input_idx] += output_vec * w_omega / (len(As_ops) * 2)
+
+    return channel_matrix
+
+def construct_unified_channel_ground(Hamsys_base, As_ops, alpha=0.05, sigma=5, BB = 2,  dTime=0.1):
+    """
+    Construct the averaged quantum channel.
+
+    Randomness sources:
+    1. Random bath frequency ω ~ Gaussin
+    2. Random choice of system operator (2 choices) in the interaction term
+    3. Random sign (±1)
+    """
+    print(f"Constructing unified channel " f"( β = {beta})...")
+
+    # System parameters and Hamiltonian
+    N = Hamsys_base.shape[0].bit_length() - 1
+    dims = [2] * (N+1)
+    d_sys = 2**N
+    Hamsys = qu.kron(Hamsys_base, qu.eye(2)).toarray()
+
+    # Bath interaction operator
+    B_op = (qu.spin_operator('x', **op_kws) + 1j*qu.spin_operator('y', **op_kws))
+    Z_bath = qu.spin_operator("z", **op_kws).toarray()
+    Hambath_base = np.kron(np.eye(d_sys), Z_bath)
+
+    # Pulse parameters
+    Ss = 5 * sigma
+    nsub = 2*round(Ss/dTime) + 1
+    tgrid = (np.arange(nsub) * dTime) - Ss
+    dt_half = -1j * dTime / 2.0
+    dt_full = -1j * dTime
+
+    # Precompute Gaussian pulse values
+    fvals = np.asarray([f_gaussian(t, sigma) for t in tgrid], dtype=np.float64)
+    amps = fvals * alpha
+
+    #  bath frequency distribution
+    n_omega_samples = BB * 10
+    omega_samples = np.linspace(0, BB, n_omega_samples)
+    w_omega = 1.0 / n_omega_samples
+    # a_freq = 2 - beta**2 / (4 * sigma**2)
+    # omega_mean = -1 / beta
+    # omega_std = np.sqrt(a_freq) / beta
+    # n_omega_samples = 201
+    # omega_cutoff_std = 5.0
+    # omega_min = omega_mean - omega_cutoff_std * omega_std
+    # omega_max = omega_mean + omega_cutoff_std * omega_std
+    # omega_samples = np.linspace(omega_min, omega_max, n_omega_samples)
+
+    # Z = (1 / beta) * np.sqrt(2 * np.pi * a_freq)
+    # g_vals = (1 / Z) * np.exp(-((beta * omega_samples + 1)**2) / (2 * a_freq))
+
+    # domega = omega_samples[1] - omega_samples[0]
+    # omega_weights = g_vals * domega
+    # omega_weights = omega_weights / np.sum(omega_weights)   
+
+
+    # Initialize channel matrix
+    channel_matrix = np.zeros((d_sys**2, d_sys**2), dtype=np.complex128)
+
+    # Loop over all random configurations
+    for omega in tqdm(zip(omega_samples),
+                            total=len(omega_samples),
+                            desc="Bath frequencies"):
+        # Bath setup for this frequency
+        Hambath_local = -omega * Z_bath 
+        Hambath = -omega * Hambath_base 
+        if beta == np.inf:
+            rhobath = np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.complex128)
+        else:
+            rhobath = expm(-beta * Hambath_local)
+            rhobath = rhobath / np.trace(rhobath)
 
         # Total Hamiltonian
         H0 = _sym_herm(Hamsys + Hambath)
@@ -237,8 +349,8 @@ def trace_out_last_qubit(state_vec):
 
 def suzuki_trotter_vbasis(phi0, fvals, alpha, dTime, Qv, wv, U0_half):
     """
-    2nd-order ST: exp[-i(H0 + amp*V) dt] ≈ U0_half · Uv(amp) · U0_half,
-    but do *all* steps in the V-eigenbasis to avoid per-step Qv transforms.
+    2nd-order ST: exp[-i(H0 + amp*H_I) dt] ≈ U0_half · U_I(amp) · U0_half,
+    but do *all* steps in the H_I-eigenbasis to avoid per-step Qv transforms.
     """
     QvH = Qv.conj().T
 
